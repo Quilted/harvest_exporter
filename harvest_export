@@ -1,0 +1,120 @@
+#!/usr/bin/env ruby
+
+require 'rubygems'
+require 'commander/import'
+require 'quilted-harvested'
+require 'fastercsv'
+
+program :version, '1.0'
+program :description, 'Exports data from Harvest'
+ 
+command :budget do |c|
+  c.syntax = 'harvest_export budget [options]'
+  c.description = 'Exports budget estimates and actuals for a given client project and timespan'
+  c.option '--filename STRING', String, 'Sets custom filename with relative path'
+  c.action do |args, options|
+    options.default :filename => 'budget.csv'
+    
+    # Set prompt
+    prompt = "===>"
+    
+    # Turn off Highline's EOF tracking
+    HighLine.track_eof = false
+    
+    # Configure authentication credentials
+    subdomain = ask("#{ prompt } Harvest Subdomain: ")
+    email = ask("#{ prompt } Harvest Email: ")
+    pw = password "#{ prompt } Password: "
+    ssl = agree("#{ prompt } Use SSL? ")
+    
+    # Authenticate    
+    harvest = Harvest.hardy_client(subdomain, email, pw, :ssl => ssl)
+    
+    begin
+      # Get active clients
+      active_clients = harvest.clients.all.select {|c| c.active }
+      active_client_list = Hash.new
+      active_clients.each do |c| 
+        active_client_list[c.id] = c.name
+      end
+
+      confirmed = FALSE
+      
+      while not confirmed
+      
+        # Select an active client
+        client_name = choose("\n#{ prompt } Select a client:", *(active_client_list.values.sort))
+        client_id = active_client_list.index client_name
+
+        # Get client's active projects
+        active_projects = harvest.projects.all.select {|p| p.active and p.client_id == client_id }
+        active_project_list = Hash.new
+        active_projects.each do |p|
+          active_project_list[p.id] = p.name
+        end
+      
+        # Select an active project
+        if active_project_list.length == 1
+          project_id = active_project_list.first.first
+          project_name = active_project_list.first.last
+        else
+          project_name = choose("\n#{ prompt } Select a project:", *(active_project_list.values.sort))
+          project_id = active_project_list.index project_name
+        end
+                        
+        # Select start and end dates
+        start_date = Time.parse(ask("\n#{ prompt } Start date (mm/dd/yyyy): "))
+        end_date = Time.parse(ask("\n#{ prompt } End date (mm/dd/yyyy): "))
+      
+        # Confirm settings
+        confirmed = agree("\n#{ prompt } Confirm: You want the budget for #{ project_name } from #{ format_date(start_date) } to #{ format_date(end_date)}? ")
+        
+      end
+
+      # Get estimates for each task
+      # @todo currently grabbing all tasks. Set flag for billable only
+      say "\n#{ prompt } Get estimates for each task"
+      tasks = Hash.new
+      task_assignments = harvest.task_assignments.all(project_id)
+      progress task_assignments, :format => "Remaining: :time_remaining" do |task_assignment|
+        tasks[task_assignment.task_id] = { :estimate => task_assignment.estimate, :actual => 0 }
+      end
+      
+      # Get day entries for each task
+      say "\n#{ prompt } Get day entries for each task"
+      time_entries = harvest.reports.time_by_project(project_id, start_date, end_date)
+      progress time_entries, :format => "Remaining: :time_remaining" do |entry|
+        tasks[entry.task_id][:actual] += entry.hours
+      end
+            
+      # Format for CSV
+      say "\n#{ prompt } Format for CSV"
+      by_row = Array.new
+      progress tasks, :format => "Remaining: :time_remaining" do |task_id, task_data|
+        task = harvest.tasks.find(task_id)
+        by_row.push [task.name, task_data[:actual], task_data[:estimate]]
+      end
+            
+      # Create CSV file
+      say "\n#{ prompt } Create CSV file\n"
+      header = %w{ Task Actual Estimate}
+      FasterCSV.open(options.filename, "w") do |csv|
+        csv << header
+        by_row.each do |row|
+          csv << row
+        end
+      end
+      
+      say "\n#{ prompt } CSV exported!"
+
+    rescue 
+      say "Oh noes! Something went wrong..."
+    end
+
+  end
+  
+  def format_date(date)
+    date.strftime("%m/%d/%Y")
+  end  
+end
+
